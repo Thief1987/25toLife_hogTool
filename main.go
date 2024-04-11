@@ -96,9 +96,10 @@ func repack(fn string, fl uint32) {
 		if i != int(files-1) {
 			p = padding(&data_buf, baseoffset)
 		}
+		fmt.Printf("0x%X       %v        %s\n", DATAoffset, size, name)
 		DATAoffset = DATAoffset + uint32(size) + p
 		filecount++
-		fmt.Printf("0x%X       %v        %s\n", DATAoffset, size, name)
+
 	}
 	if fl != 0 {
 		TOC_buf.Write(name_buf.Bytes())
