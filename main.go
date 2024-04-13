@@ -13,20 +13,60 @@ import (
 
 const hogMagic = 0x00020001
 
+type hogHeader struct {
+	Magic           uint32
+	baseoffset      uint32
+	Encryption_flag uint32
+	Header_CRC      uint32
+	Filecount       uint32
+	TOC_size        uint32
+	TOC_CRC         uint32
+}
+
+type TOC_entry struct {
+	data_name_offset uint32
+	data_offset      uint32
+	data_size        uint32
+	data_CRC         uint32
+}
+
 func ReadUint32(r io.Reader) uint32 {
 	var buf bytes.Buffer
 	io.CopyN(&buf, r, 4)
 	return binary.LittleEndian.Uint32(buf.Bytes())
 }
 
-func HeaderInit(h *bytes.Buffer, o uint32, f uint32, s uint32, crc uint32, fl uint32) {
-	binary.Write(h, binary.LittleEndian, uint32(hogMagic)) //Magic
-	binary.Write(h, binary.LittleEndian, o)                //TOC offset
-	binary.Write(h, binary.LittleEndian, fl)               //Encryption flag
-	binary.Write(h, binary.LittleEndian, uint32(0))        //Header CRC
-	binary.Write(h, binary.LittleEndian, f)                //Files count
-	binary.Write(h, binary.LittleEndian, s)                //TOC size
-	binary.Write(h, binary.LittleEndian, uint32(crc))      //TOC CRC
+func hogHeaderInit(o uint32, fl uint32, f uint32, s uint32, crc uint32) hogHeader {
+	return hogHeader{
+		Magic:           hogMagic,
+		baseoffset:      o,
+		Encryption_flag: fl,
+		Header_CRC:      0,
+		Filecount:       f,
+		TOC_size:        s,
+		TOC_CRC:         crc,
+	}
+}
+
+func hogHeaderRead(arc *os.File) hogHeader {
+	return hogHeader{
+		Magic:           ReadUint32(arc),
+		baseoffset:      ReadUint32(arc),
+		Encryption_flag: ReadUint32(arc),
+		Header_CRC:      ReadUint32(arc),
+		Filecount:       ReadUint32(arc),
+		TOC_size:        ReadUint32(arc),
+		TOC_CRC:         ReadUint32(arc),
+	}
+}
+
+func TOC_entry_fill(name_off uint32, off uint32, s uint32, crc uint32) TOC_entry {
+	return TOC_entry{
+		data_name_offset: name_off,
+		data_offset:      off,
+		data_size:        s,
+		data_CRC:         crc,
+	}
 }
 
 func padding(d *bytes.Buffer, base uint32) uint32 {
@@ -74,7 +114,7 @@ func repack(fn string, fl uint32) {
 	for i := 0; i < int(files); i++ {
 		var f_buf bytes.Buffer
 		n, _ := meta_buf.ReadString(0)
-		name := strings.Replace(n, "\x00", "", -1)
+		name := strings.Replace(n, "\x00", "", 1)
 		f, _ := os.Open(name)
 		defer f.Close()
 		info, _ := f.Stat()
@@ -85,10 +125,7 @@ func repack(fn string, fl uint32) {
 		} else {
 			io.Copy(&f_buf, f)
 		}
-		binary.Write(&TOC_buf, binary.LittleEndian, uint32(NToffset+NT_size))
-		binary.Write(&TOC_buf, binary.LittleEndian, uint32(DATAoffset))
-		binary.Write(&TOC_buf, binary.LittleEndian, uint32(size))
-		binary.Write(&TOC_buf, binary.LittleEndian, CRCcalc(f_buf.Bytes(), uint32(f_buf.Len()), 0))
+		binary.Write(&TOC_buf, binary.LittleEndian, TOC_entry_fill(NToffset+NT_size, DATAoffset, uint32(size), CRCcalc(f_buf.Bytes(), uint32(f_buf.Len()), 0)))
 		name_buf.WriteString(name)
 		binary.Write(&name_buf, binary.LittleEndian, uint8(0))
 		NT_size = NT_size + uint32(len(name)) + 1
@@ -99,7 +136,6 @@ func repack(fn string, fl uint32) {
 		fmt.Printf("0x%X       %v        %s\n", DATAoffset, size, name)
 		DATAoffset = DATAoffset + uint32(size) + p
 		filecount++
-
 	}
 	if fl != 0 {
 		TOC_buf.Write(name_buf.Bytes())
@@ -108,7 +144,7 @@ func repack(fn string, fl uint32) {
 		TOC_buf.Write(name_buf.Bytes())
 	}
 	TOC_crc := CRCcalc(TOC_buf.Bytes(), uint32(TOC_buf.Len()), 0)
-	HeaderInit(&header_buf, baseoffset, files, TOC_size, TOC_crc, fl)
+	binary.Write(&header_buf, binary.LittleEndian, hogHeaderInit(baseoffset, fl, files, TOC_size, TOC_crc))
 	header_crc := CRCcalc(header_buf.Bytes(), uint32(header_buf.Len()), 0)
 	padding(&header_buf, baseoffset)
 	new_arc.Write(header_buf.Bytes())
@@ -133,34 +169,32 @@ func unpack(fn string) {
 	os.Chdir(arc.Name()[:len(arc.Name())-len(path.Ext(arc.Name()))])
 	meta, _ := os.Create("metadata.bin")
 	defer meta.Close()
-	_ = ReadUint32(arc) //Magic
-	baseoffset := ReadUint32(arc)
-	enc_flag := ReadUint32(arc)
-	_ = ReadUint32(arc) // Header CRC
-	files := ReadUint32(arc)
-	TOC_size := ReadUint32(arc)
-	binary.Write(meta, binary.LittleEndian, baseoffset)
-	binary.Write(meta, binary.LittleEndian, files)
-	binary.Write(meta, binary.LittleEndian, TOC_size)
-	arc.Seek(int64(baseoffset), 0)
-	if enc_flag == 0x0000F00D {
-		io.CopyN(&enc_buf, arc, int64(TOC_size))
+	h := hogHeaderRead(arc)
+	if h.Magic != hogMagic {
+		log.Fatal("Invalid .hog archive")
+	}
+	binary.Write(meta, binary.LittleEndian, h.baseoffset)
+	binary.Write(meta, binary.LittleEndian, h.Filecount)
+	binary.Write(meta, binary.LittleEndian, h.TOC_size)
+	arc.Seek(int64(h.baseoffset), 0)
+	if h.Encryption_flag == 0x0000F00D {
+		io.CopyN(&enc_buf, arc, int64(h.TOC_size))
 		TOC_buf.Write(decrypt(enc_buf))
 	} else {
-		io.CopyN(&TOC_buf, arc, int64(TOC_size))
+		io.CopyN(&TOC_buf, arc, int64(h.TOC_size))
 	}
 	reader := bytes.NewReader(TOC_buf.Bytes())
-	for i := 0; i < int(files); i++ {
+	for i := 0; i < int(h.Filecount); i++ {
 		var name_buf bytes.Buffer
-		name_off := ReadUint32(reader) - baseoffset
+		name_off := ReadUint32(reader) - h.baseoffset
 		offset := ReadUint32(reader)
 		size := ReadUint32(reader)
 		_ = ReadUint32(reader) // CRC
 		savepos, _ := reader.Seek(0, 1)
-		next_name_off := ReadUint32(reader) - baseoffset
+		next_name_off := ReadUint32(reader) - h.baseoffset
 		reader.Seek(int64(name_off), 0)
-		if i == int(files-1) {
-			io.CopyN(&name_buf, reader, int64(TOC_size)-int64(name_off)-1)
+		if i == int(h.Filecount-1) {
+			io.CopyN(&name_buf, reader, int64(h.TOC_size)-int64(name_off)-1)
 		} else {
 			io.CopyN(&name_buf, reader, int64(next_name_off)-int64(name_off)-1)
 		}
@@ -168,7 +202,7 @@ func unpack(fn string) {
 		os.MkdirAll(path.Dir(p), 0700)
 		f, _ := os.Create(name_buf.String())
 		arc.Seek(int64(offset), 0)
-		if enc_flag == 0x0000F00D {
+		if h.Encryption_flag == 0x0000F00D {
 			enc_buf.Reset()
 			io.CopyN(&enc_buf, arc, int64(size))
 			f.Write(decrypt(enc_buf))
