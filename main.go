@@ -218,7 +218,7 @@ func unpack(fn string) {
 			redundant := decrypt(&enc_buf)
 			f.Write(enc_buf.Bytes()[:(enc_buf.Len() - redundant)])
 		} else {
-			io.CopyN(f, arc, int64(size))
+			io.CopyN(f, datareader, int64(size))
 		}
 		f.Close()
 		meta.WriteString(name_buf.String())
