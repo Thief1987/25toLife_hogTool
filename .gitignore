@@ -17,6 +17,7 @@ main/
 say/
 *.hog*
 
+.idea
 # Go workspace file
 go.work
 

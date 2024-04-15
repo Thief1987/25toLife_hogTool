@@ -9,9 +9,12 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 const hogMagic = 0x00020001
+
+var s time.Time
 
 type hogHeader struct {
 	Magic           uint32
@@ -153,11 +156,12 @@ func repack(fn string, fl uint32) {
 	new_arc.Write(data_buf.Bytes())
 	new_arc.Seek(0xC, 0)
 	binary.Write(new_arc, binary.LittleEndian, header_crc)
-	fmt.Printf("%v files succesfully packed", filecount)
+	f := time.Now()
+	fmt.Printf("%v files succesfully packed in %.2f sec", filecount, f.Sub(s).Abs().Seconds())
 }
 
 func unpack(fn string) {
-	var enc_buf, TOC_buf bytes.Buffer
+	var enc_buf, TOC_buf, arc_buf bytes.Buffer
 
 	filecount := 0
 	arc, err := os.Open(fn)
@@ -173,21 +177,27 @@ func unpack(fn string) {
 	if h.Magic != hogMagic {
 		log.Fatal("Invalid .hog archive")
 	}
+	info, _ := arc.Stat()
+	arcsize := info.Size()
+	DATAoffset := (h.baseoffset + h.TOC_size) + h.baseoffset - ((h.baseoffset + h.TOC_size) % h.baseoffset)
 	binary.Write(meta, binary.LittleEndian, h.baseoffset)
 	binary.Write(meta, binary.LittleEndian, h.Filecount)
 	binary.Write(meta, binary.LittleEndian, h.TOC_size)
 	arc.Seek(int64(h.baseoffset), 0)
 	if h.Encryption_flag == 0x0000F00D {
-		io.CopyN(&enc_buf, arc, int64(h.TOC_size))
-		TOC_buf.Write(decrypt(enc_buf))
+		io.CopyN(&TOC_buf, arc, int64(h.TOC_size))
+		decrypt(&TOC_buf)
 	} else {
 		io.CopyN(&TOC_buf, arc, int64(h.TOC_size))
 	}
+	arc.Seek(int64(DATAoffset), 0)
+	io.CopyN(&arc_buf, arc, arcsize-int64(DATAoffset))
 	reader := bytes.NewReader(TOC_buf.Bytes())
+	datareader := bytes.NewReader(arc_buf.Bytes())
 	for i := 0; i < int(h.Filecount); i++ {
 		var name_buf bytes.Buffer
 		name_off := ReadUint32(reader) - h.baseoffset
-		offset := ReadUint32(reader)
+		offset := ReadUint32(reader) - DATAoffset
 		size := ReadUint32(reader)
 		_ = ReadUint32(reader) // CRC
 		savepos, _ := reader.Seek(0, 1)
@@ -201,11 +211,12 @@ func unpack(fn string) {
 		p := strings.Replace(name_buf.String(), "\\", "/", -1)
 		os.MkdirAll(path.Dir(p), 0700)
 		f, _ := os.Create(name_buf.String())
-		arc.Seek(int64(offset), 0)
+		datareader.Seek(int64(offset), 0)
 		if h.Encryption_flag == 0x0000F00D {
 			enc_buf.Reset()
-			io.CopyN(&enc_buf, arc, int64(size))
-			f.Write(decrypt(enc_buf))
+			io.CopyN(&enc_buf, datareader, int64(size))
+			redundant := decrypt(&enc_buf)
+			f.Write(enc_buf.Bytes()[:(enc_buf.Len() - redundant)])
 		} else {
 			io.CopyN(f, arc, int64(size))
 		}
@@ -216,11 +227,13 @@ func unpack(fn string) {
 		filecount++
 		fmt.Printf("0x%X       %v        %s\n", offset, size, name_buf.String())
 	}
-	fmt.Printf("%v files succesfully extracted", filecount)
+	f := time.Now()
+	fmt.Printf("%v files succesfully unpacked in %.2f sec", filecount, f.Sub(s).Abs().Seconds())
 }
 func main() {
 	var enc_flag uint32
 
+	s = time.Now()
 	args := os.Args
 	if len(args) == 1 {
 		log.Fatal("Usage:\n    unpack: -u archive_name\n    repack: -r archive_name -enc <- (optional flag, if you want to encrypt data in the archive)")
